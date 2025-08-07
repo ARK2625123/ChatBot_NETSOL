@@ -26,3 +26,6 @@ collection.insert_one({
 # Retrieve and print the message
 result = collection.find_one({"user_id": "user123"})
 print(result)
+
+print(result)
+print(result)
