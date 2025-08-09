@@ -1,0 +1,14 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.0
+pymongo==4.7.2
+python-dotenv==1.0.1
+langchain==0.2.10
+langchain-community==0.2.9
+langgraph==0.2.16
+sentence-transformers==3.0.1
+faiss-cpu==1.8.0
+pypdf==4.3.1
+gradio==4.43.0
+tavily-python==0.3.7
+google-generativeai==0.7.2
+langfuse==2.39.1
