@@ -1,18 +1,19 @@
 # app/main.py
 import uuid
+from datetime import datetime
+from typing import Optional, List
+
 from fastapi import FastAPI, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
+
 from .db import messages
 from .model import ChatIn, ChatMessage
-from datetime import datetime
-from pymongo import ASCENDING, DESCENDING
-import logging
+from .rag.retriever import load_retriever
+from .llm.gemini import ask_gemini
 
 app = FastAPI()
-log = logging.getLogger("uvicorn.error")
+retriever = None
 
-# Allow CORS for dev
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,80 +21,120 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Attach request_id to every request
+# ---- request id middleware (safe to keep) ----
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
-    request_id = str(uuid.uuid4())
-    request.state.request_id = request_id
+    rid = str(uuid.uuid4())
+    request.state.request_id = rid
     response = await call_next(request)
-    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Request-ID"] = rid
     return response
 
-# Startup: create indexes
+
 @app.on_event("startup")
-def create_indexes():
-    try:
-        messages.create_index([("user_id", ASCENDING), ("thread_id", ASCENDING), ("ts", DESCENDING)])
-        messages.create_index([("request_id", ASCENDING)])
-        log.info("MongoDB indexes ensured.")
-    except Exception as e:
-        log.error(f"Mongo index creation failed: {e}")
+def _startup():
+    global retriever
+    retriever = load_retriever()
 
-# Health check
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
 
-# Chat endpoint
+def _ensure_thread_id(thread_id: Optional[str]) -> str:
+    return thread_id or f"t_{uuid.uuid4().hex[:10]}"
+
+
+def _answer_with_rag(question: str, top_k: int = 4):
+    """
+    Retrieves top-k chunks (if retriever available), builds a prompt,
+    calls Gemini, and returns (answer, raw_docs).
+    raw_docs are the retrieved LangChain Documents; we decide later
+    whether to expose citations to the client.
+    """
+    raw_docs: List = []
+    context_blocks = []
+
+    if retriever is not None:
+        try:
+            raw_docs = retriever.get_relevant_documents(question)[:top_k]
+        except Exception:
+            raw_docs = []
+
+        for d in raw_docs:
+            src = d.metadata.get("source", "unknown")
+            context_blocks.append(f"[SOURCE: {src}]\n{d.page_content}")
+    else:
+        context_blocks.append("(No index loaded)")
+
+    context_text = "\n\n".join(context_blocks)
+    prompt = f"""You are a helpful analyst. Use ONLY the context to answer.
+If unsure from context, say you don't know.
+
+Question:
+{question}
+
+Context:
+{context_text}
+
+Answer with 2-4 sentences.
+"""
+
+    answer = ask_gemini(prompt).strip()
+    return answer, raw_docs
+
+
 @app.post("/chat")
-async def chat(request: Request, body: ChatIn):
-    req_id = request.state.request_id
-    thread_id = body.thread_id or f"t_{uuid.uuid4().hex[:10]}"
+async def chat(
+    request: Request,
+    body: ChatIn,
+    include_citations: bool = Query(False),
+):
+    # be defensive: if middleware didn’t run, synthesize an id
+    req_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+    thread_id = _ensure_thread_id(body.thread_id)
 
-    # Store user message
+    # store user message (lean)
     user_msg = ChatMessage(
         user_id=body.user_id,
         thread_id=thread_id,
         role="user",
         content=body.message,
-        ts=datetime.utcnow(),
-        request_id=req_id
+        request_id=req_id,
     ).model_dump()
     messages.insert_one(user_msg)
 
-    # Placeholder assistant reply (later replaced with RAG/LangGraph)
-    bot_reply = "Got it! (LLM reply will go here.)"
+    # RAG + Gemini
+    answer, raw_docs = _answer_with_rag(body.message)
+
+    # store bot message (lean)
     bot_msg = ChatMessage(
         user_id=body.user_id,
         thread_id=thread_id,
         role="assistant",
-        content=bot_reply,
-        ts=datetime.utcnow(),
-        request_id=req_id
+        content=answer,
+        request_id=req_id,
     ).model_dump()
     messages.insert_one(bot_msg)
 
-    return {
+    # build response
+    resp = {
         "request_id": req_id,
         "thread_id": thread_id,
-        "answer": bot_reply
+        "answer": answer,
     }
 
-# History endpoint
-@app.get("/history")
-async def history(
-    user_id: str = Query(...),
-    thread_id: str = Query(...),
-    limit: int = Query(50, ge=1, le=200)
-):
-    cursor = messages.find({"user_id": user_id, "thread_id": thread_id}).sort("ts", 1).limit(limit)
-    docs = [
-        {
-            "role": d["role"],
-            "content": d["content"],
-            "ts": d.get("ts"),
-            "request_id": d.get("request_id")
-        }
-        for d in cursor
-    ]
-    return {"count": len(docs), "messages": docs}
+    # optional tiny citations (NOT stored in DB)
+    if include_citations and raw_docs:
+        citations = []
+        seen = set()
+        for d in raw_docs[:3]:  # keep it small
+            src = d.metadata.get("source", "unknown")
+            page = d.metadata.get("page")
+            key = (src, page)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            text = d.page_content or ""
+            snippet = text[:180] + ("…" if len(text) > 180 else "")
+            citations.append({"source": src, "page": page, "snippet": snippet})
+        resp["citations"] = citations
+
+    return resp
