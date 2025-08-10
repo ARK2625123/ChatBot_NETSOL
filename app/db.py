@@ -16,3 +16,8 @@ client = MongoClient(
 
 db = client["chatbot"]
 messages = db["messages"]
+
+
+# add:
+threads = db["threads"]
+
