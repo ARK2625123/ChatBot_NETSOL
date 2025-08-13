@@ -1,4 +1,4 @@
-# app/main.py
+
 import os
 import uuid
 from datetime import datetime
@@ -10,10 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from .db import messages
 from .model import ChatIn, ChatMessage
 from .llm.gemini import ask_gemini
-from .rag.retriever import load_retriever, build_or_update_index
+from .rag.retriever import load_retriever
 
-STORAGE_PDF = os.getenv("RAG_PDF_PATH", "data/test.pdf")
-INDEX_DIR = os.getenv("RAG_INDEX_DIR", "rag_index/")
+# No file upload
+# STORAGE_PDF = os.getenv("RAG_PDF_PATH", "data/test.pdf")
+# INDEX_DIR = os.getenv("RAG_INDEX_DIR", "rag_index/")
 
 app = FastAPI()
 retriever = None  # loaded at startup
@@ -33,34 +34,6 @@ async def add_request_id(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Request-ID"] = rid
     return response
-
-
-def _ensure_index():
-    """
-    Build/refresh the FAISS index from STORAGE_PDF into INDEX_DIR if needed.
-    """
-    if not os.path.exists(STORAGE_PDF):
-        raise FileNotFoundError(
-            f"RAG PDF not found at {STORAGE_PDF}. Put your file there or set RAG_PDF_PATH."
-        )
-    os.makedirs(INDEX_DIR, exist_ok=True)
-    # Rebuild if index appears missing OR if PDF is newer than index folder
-    idx_mtime = max((os.path.getmtime(os.path.join(INDEX_DIR, p))
-                    for p in os.listdir(INDEX_DIR)), default=0.0) if os.listdir(INDEX_DIR) else 0.0
-    pdf_mtime = os.path.getmtime(STORAGE_PDF)
-    if idx_mtime < pdf_mtime:
-        print(f"[RAG] Building/refreshing index from {STORAGE_PDF} → {INDEX_DIR}")
-        build_or_update_index([STORAGE_PDF], INDEX_DIR)
-    else:
-        print(f"[RAG] Using existing index in {INDEX_DIR}")
-
-
-@app.on_event("startup")
-def _startup():
-    global retriever
-    _ensure_index()
-    retriever = load_retriever(INDEX_DIR)
-    print("[RAG] Retriever ready.")
 
 
 def _answer_with_rag(question: str, top_k: int = 4):
@@ -101,6 +74,13 @@ Answer in 2–4 sentences.
     return answer, raw_docs
 
 
+@app.on_event("startup")
+def _startup():
+    global retriever
+    retriever = load_retriever("rag_index")  # Static index location for now
+    print("[RAG] Retriever ready.")
+
+
 @app.post("/chat")
 async def chat(
     request: Request,
@@ -108,57 +88,53 @@ async def chat(
     include_citations: bool = Query(False),
 ):
     req_id = getattr(request.state, "request_id", str(uuid.uuid4()))
-    thread_id = body.thread_id or "t1"  # keep a single logical thread
+    user_id = body.user_id  # we are assuming a single user in this case
 
-    # store user message
+    # Get last 5 chat messages from DB (regardless of thread ID)
+    messages_cursor = messages.find({"user_id": user_id}).sort("created_at", -1).limit(5)
+    chat_history = [{"role": m["role"], "content": m["content"]} for m in messages_cursor]
+
+    # Prepare context: concatenate the last 5 messages for RAG context
+    context = "\n".join([f"{msg['role']}: {msg['content']}" for msg in chat_history])
+
+    # Add user question to context
+    context += f"\nUser: {body.message}\nAssistant:"
+
+    # Get answer from RAG
+    answer, raw_docs = _answer_with_rag(context)
+
+    # Store user message
     messages.insert_one(ChatMessage(
         user_id=body.user_id,
-        thread_id=thread_id,
+        thread_id="t1",  # Single thread logic, no need for thread ID
         role="user",
         content=body.message,
         request_id=req_id,
+        created_at=datetime.utcnow(),
     ).model_dump())
 
-    # RAG + Gemini
-    answer, raw_docs = _answer_with_rag(body.message)
-
-    # store bot message
+    # Store bot message
     messages.insert_one(ChatMessage(
         user_id=body.user_id,
-        thread_id=thread_id,
+        thread_id="t1",
         role="assistant",
         content=answer,
         request_id=req_id,
+        created_at=datetime.utcnow(),
     ).model_dump())
 
-    resp = {"request_id": req_id, "thread_id": thread_id, "answer": answer}
+    # Prepare response
+    resp = {
+        "request_id": req_id,
+        "answer": answer,
+    }
 
     if include_citations and raw_docs:
-        citations, seen = [], set()
-        for d in raw_docs[:3]:
+        citations = []
+        for d in raw_docs[:3]:  # limit citations to top 3
             src = d.metadata.get("source", "unknown")
-            page = d.metadata.get("page")
-            key = (src, page)
-            if key in seen:
-                continue
-            seen.add(key)
-            text = d.page_content or ""
-            snippet = text[:180] + ("…" if len(text) > 180 else "")
-            citations.append({"source": src, "page": page, "snippet": snippet})
+            page = d.metadata.get("page", "N/A")
+            citations.append({"source": src, "page": page, "snippet": d.page_content[:180]})
         resp["citations"] = citations
 
     return resp
-
-
-@app.post("/rebuild_index")
-def rebuild_index():
-    """
-    Force a rebuild of the FAISS index from STORAGE_PDF.
-    Handy if you replace storage/test.pdf while the server is running.
-    """
-    global retriever
-    if not os.path.exists(STORAGE_PDF):
-        raise HTTPException(404, f"Not found: {STORAGE_PDF}")
-    build_or_update_index([STORAGE_PDF], INDEX_DIR)
-    retriever = load_retriever(INDEX_DIR)
-    return {"ok": True, "index_dir": INDEX_DIR, "source": STORAGE_PDF}
