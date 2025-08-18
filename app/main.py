@@ -273,6 +273,28 @@ async def delete_file(user_id: str, filename: str):
         print(f"Error deleting file {filename} for {user_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Error deleting file: {str(e)}")
 
+
+@app.delete("/chat/history/{user_id}")
+async def clear_chat_history(user_id: str):
+    """Clear chat history for a specific user"""
+    if user_id not in ["user1", "user2", "user3"]:
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+    
+    try:
+        messages_collection = get_user_messages_collection(user_id)
+        if messages_collection is None:
+            raise HTTPException(status_code=500, detail="Database error")
+        
+        result = messages_collection.delete_many({"user_id": user_id})
+        return {
+            "message": f"Chat history cleared for {user_id}",
+            "deleted_messages": result.deleted_count
+        }
+    except Exception as e:
+        print(f"Error clearing history for {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error clearing history: {str(e)}")
+    
+
 # ---- User management endpoints ----
 @app.get("/users")
 async def get_available_users():
@@ -283,25 +305,33 @@ async def get_available_users():
 async def get_user_status(user_id: str):
     """Get status of a specific user"""
     try:
-        # ✅ FIXED: Get messages collection and use explicit None comparison
         user_collection = get_user_messages_collection(user_id)
-        if user_collection is None:  # ✅ FIXED: Explicit None comparison
+        if user_collection is None:
             raise HTTPException(status_code=500, detail="User collection not found.")
         
-        # Get actual user stats
         message_count = user_collection.count_documents({"user_id": user_id})
         
         # Get files collection to check file count
         files_collection = get_user_files_collection(user_id)
         file_count = 0
-        if files_collection is not None:  # ✅ FIXED: Explicit None comparison
+        processed_files = 0
+        uploaded_files = []
+        
+        if files_collection is not None:
             file_count = files_collection.count_documents({"user_id": user_id})
+            processed_files = files_collection.count_documents({"user_id": user_id, "processed": True})
+            
+            # Get list of uploaded file names
+            files_cursor = files_collection.find({"user_id": user_id}, {"original_filename": 1})
+            uploaded_files = [f["original_filename"] for f in files_cursor]
         
         user_status = {
             "user_id": user_id, 
             "status": "active",
             "message_count": message_count,
-            "file_count": file_count
+            "file_count": file_count,
+            "processed_files": processed_files,  # ✅ Added this field
+            "uploaded_files": uploaded_files     # ✅ Added this field
         }
         return user_status
         

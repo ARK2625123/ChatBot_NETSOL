@@ -93,14 +93,17 @@ def switch_user(new_user: str, state: dict):
     # Get user status
     try:
         status = api_get_user_status(new_user)
-        status_text = f"**User: {new_user}**\n📝 Messages: {status['message_count']}\n📁 Files: {status['file_count']} ({status['processed_files']} processed)\n📋 Documents: {', '.join(status['uploaded_files']) if status['uploaded_files'] else 'None'}"
+        processed_files = status.get('processed_files', 0)  # ✅ Safe access
+        uploaded_files = status.get('uploaded_files', [])  # ✅ Safe access
+        
+        status_text = f"**User: {new_user}**\n📝 Messages: {status['message_count']}\n📁 Files: {status['file_count']} ({processed_files} processed)\n📋 Documents: {', '.join(uploaded_files) if uploaded_files else 'None'}"
     except Exception as e:
         status_text = f"**User: {new_user}**\nError loading status: {str(e)}"
     
     # Get user files
     try:
         files = api_get_user_files(new_user)
-        file_list = "\n".join([f"• {f['filename']} ({'✓' if f['processed'] else '⏳'})" for f in files]) if files else "No files uploaded"
+        file_list = "\n".join([f"• {f.get('original_filename', f.get('filename', 'Unknown'))} ({'✓' if f.get('processed', False) else '⏳'})" for f in files]) if files else "No files uploaded"
     except Exception as e:
         file_list = f"Error loading files: {str(e)}"
     
