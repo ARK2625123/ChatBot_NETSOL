@@ -13,13 +13,8 @@ def main():
     print("🚀 Starting NETSOL Multi-User RAG Chatbot Server...")
     print("📍 Backend API will be available at: http://127.0.0.1:8000")
     print("📚 API Documentation: http://127.0.0.1:8000/docs")
-    print("🔄 Health Check: http://127.0.0.1:8000/health")
-    print("\n⚙️ Features enabled:")
-    print("  • Multi-user support (user1, user2, user3)")
-    print("  • File upload and processing")
-    print("  • RAG document analysis")
-    print("  • Web search integration (Tavily)")
-    print("  • LangGraph decision making")
+   
+  
     print("\n🛑 Press Ctrl+C to stop the server\n")
     
     # Add the current directory to Python path so 'app' can be imported

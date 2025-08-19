@@ -89,7 +89,7 @@ class ReactAgent:
                         content=result.get("content", "No available content")
                         url=result.get("url", "No URL")
                         s_result.append(f"Result {i}: {title}Content: {content}...Source: {url}")
-            
+                    return "\n\n".join(s_result)  #return the search results as a string
             
             except Exception as e:
                 return f"Error searching web: {str(e)}"
