@@ -12,7 +12,7 @@ from app.db import get_user_files_collection
 class MultiUserRetriever:
     def __init__(self):
         self.embedding_model = self._get_embeddings()
-        self.user_retrievers = {}  # Cache retrievers per user
+        self.user_retrievers = {} 
     
     def _get_embeddings(self):
         """Get embedding model"""
@@ -37,7 +37,7 @@ class MultiUserRetriever:
                 loader = PyPDFLoader(file_path)
                 file_docs = loader.load()
                 
-                # Add user metadata to each document
+              
                 for doc in file_docs:
                     doc.metadata["user_id"] = user_id
                     doc.metadata["source"] = Path(file_path).name
@@ -48,18 +48,18 @@ class MultiUserRetriever:
                 print(f"No documents loaded for user {user_id}")
                 return False
             
-            # Split documents
+           
             splitter = RecursiveCharacterTextSplitter(
                 chunk_size=1000, 
                 chunk_overlap=150
             )
             chunks = splitter.split_documents(docs)
             
-            # Create vector store
+          
             vs = FAISS.from_documents(chunks, self.embedding_model)
             vs.save_local(str(index_dir))
             
-            # Clear cached retriever to force reload
+            
             if user_id in self.user_retrievers:
                 del self.user_retrievers[user_id]
             
@@ -99,7 +99,7 @@ class MultiUserRetriever:
         """Query documents for a specific user"""
         retriever = self.get_user_retriever(user_id)
         
-        if not retriever:  # ✅ This is fine - retriever is not a MongoDB collection
+        if not retriever: 
             return "No documents available for this user.", []
         
         try:
@@ -124,38 +124,30 @@ class MultiUserRetriever:
     
     def add_file_to_user_index(self, user_id: str, file_path: str) -> bool:
         """Add a single file to user's existing index"""
-        # Get existing files for this user
+       
         files_collection = get_user_files_collection(user_id)
         
-        # ❌ OLD CODE - This causes the error:
-        # if not files_collection:
-        #     return False
-        
-        # ✅ FIXED CODE - Explicit None comparison:
+       
         if files_collection is None:
             print(f"Files collection not available for user {user_id}")
             return False
         
-        # Get all file paths for this user
+    
         user_files = list(files_collection.find({"user_id": user_id, "processed": True}))
         file_paths = [f["file_path"] for f in user_files]
         
-        # Add new file
+    
         if file_path not in file_paths:
             file_paths.append(file_path)
         
-        # Rebuild index with all files
+       
         return self.build_user_index(user_id, file_paths)
     
     def get_user_file_list(self, user_id: str) -> List[str]:
         """Get list of files for a user"""
         files_collection = get_user_files_collection(user_id)
         
-        # ❌ OLD CODE:
-        # if not files_collection:
-        #     return []
-        
-        # ✅ FIXED CODE - Explicit None comparison:
+      
         if files_collection is None:
             return []
         
