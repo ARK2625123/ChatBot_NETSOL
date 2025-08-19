@@ -12,7 +12,7 @@ from app.db import get_user_messages_collection, get_user_files_collection
 from app.model import ChatIn, ChatMessage, FileMetadata, UserSwitchRequest
 from app.llm.gemini import ask_gemini
 from app.rag.retriever import multi_user_retriever
-from app.agent.langgraph_agent import ChatbotAgent
+from app.agent.langgraph_agent import ReactAgent
 from app.file_handler import file_handler
 
 app = FastAPI()
@@ -20,9 +20,9 @@ app = FastAPI()
 # Initialize the LangGraph agent
 def rag_wrapper(user_id: str, query: str):
     """Wrapper function for RAG retrieval to be used by the agent"""
-    return multi_user_retriever.query_user_documents(user_id, query)
+    return multi_user_retriever.query_user_documents(user_id, query,4)
 
-chatbot_agent = ChatbotAgent(rag_wrapper)
+chatbot_agent = ReactAgent(rag_wrapper)
 
 app.add_middleware(
     CORSMiddleware,
@@ -63,7 +63,7 @@ async def chat(
     
     # Get user's message collection
     messages_collection = get_user_messages_collection(user_id)
-    if messages_collection is None:  # ✅ FIXED: Explicit None comparison
+    if messages_collection is None:  
         raise HTTPException(status_code=500, detail="Database error")
     
     try:

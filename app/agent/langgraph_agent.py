@@ -1,189 +1,121 @@
-# app/agent/langgraph_agent.py
-from typing import TypedDict, Literal, List, Dict, Any
-from langchain_core.messages import HumanMessage, AIMessage
-from langgraph.graph import StateGraph, END
-from ..search.tavily_search import tavily_searcher
-from ..llm.gemini import ask_gemini
-import json
+from typing import List, Dict, Any
+from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.prebuilt import create_react_agent
+from langchain_google_genai import ChatGoogleGenerativeAI
+from ..search.tavily_search import TavilySearcher
+from ..rag.retriever import MultiUserRetriever
+import os
 
-class AgentState(TypedDict):
-    messages: List[Any]
-    user_query: str
-    decision: Literal["rag", "search", "both"]
-    rag_context: str
-    search_results: List[Dict]
-    final_answer: str
-    user_id: str
+class ReactAgent:
+    def __init__(self,MultiUserRetriever):
+        
+        self.multiuser_retriever = MultiUserRetriever #Giving bro the retriebver function
 
-class ChatbotAgent:
-    def __init__(self, rag_retriever_func):
-        self.rag_retriever_func = rag_retriever_func
-        self.graph = self._create_graph()
-    
-    def _create_graph(self):
-        workflow = StateGraph(AgentState)
+        self.llm=ChatGoogleGenerativeAI(  #kinda initializing the llm, giving it all the good stuff
+            model="gemini-1.5-flash",
+            temperature=0.1,
+            google_api_key=os.getenv("GOOGLE_API_KEY"))
         
-        # Add nodes
-        workflow.add_node("decide_tool", self.decide_tool)
-        workflow.add_node("use_rag", self.use_rag)
-        workflow.add_node("use_search", self.use_search)
-        workflow.add_node("use_both", self.use_both)
-        workflow.add_node("generate_answer", self.generate_answer)
+       
+
+        self.tools= self.create_tools()  #gonna use this to initialize the tools which we will use
         
-        # Set entry point
-        workflow.set_entry_point("decide_tool")
-        
-        # Add conditional edges
-        workflow.add_conditional_edges(
-            "decide_tool",
-            self.route_decision,
-            {
-                "rag": "use_rag",
-                "search": "use_search", 
-                "both": "use_both"
-            }
+        self.agent=create_react_agent(  #actually putting the good stuff in our agent
+            tools=self.tools,
+            model=self.llm,
+            prompt= self._get_system_message())      #had to do this cuz it wasnt working when i pass state modifier directly to it
+
+    def _get_system_message(self):
+        return SystemMessage( #the code of conduct, kinda like the crystals from Superman (1978)
+            content="You are a helpful assistant and a financial analyst. You can answer questions about uploaded financial documents or search the web,or do both at once for users.Be concise and precise when answering questions. If you don't know the answer, say 'I don't know'. When searching the web use the TavilySearcher tool and when retrieving info from uploaded documents use the MultiUserRetriever tool.",
         )
-        
-        # All paths lead to generate_answer
-        workflow.add_edge("use_rag", "generate_answer")
-        workflow.add_edge("use_search", "generate_answer")
-        workflow.add_edge("use_both", "generate_answer")
-        workflow.add_edge("generate_answer", END)
-        
-        return workflow.compile()
     
-    def decide_tool(self, state: AgentState) -> AgentState:
-        """Decide whether to use RAG, search, or both"""
-        user_query = state["user_query"]
-        
-        decision_prompt = f"""
-        Analyze this user query and decide what tool(s) to use:
-        
-        Query: "{user_query}"
-        
-        Decision criteria:
-        - Use "rag" for: questions about uploaded documents, internal company info, financial analysis of provided docs
-        - Use "search" for: current events, latest news, real-time information, general web knowledge
-        - Use "both" for: queries that might benefit from both document analysis AND current information
-        
-        Examples:
-        - "What's in my financial report?" -> rag
-        - "What's the current stock price of AAPL?" -> search  
-        - "How does my company's performance compare to current market trends?" -> both
-        
-        Respond with ONLY one word: rag, search, or both
-        """
-        
-        try:
-            decision = ask_gemini(decision_prompt).strip().lower()
-            if decision not in ["rag", "search", "both"]:
-                decision = "rag"  # default fallback
-        except:
-            decision = "rag"  # default fallback
-        
-        state["decision"] = decision
-        return state
-    
-    def route_decision(self, state: AgentState) -> str:
-        return state["decision"]
-    
-    def use_rag(self, state: AgentState) -> AgentState:
-        """Use RAG to get context from uploaded documents"""
-        try:
-            user_id = state["user_id"]
-            query = state["user_query"]
+
+    def create_tools(self) -> list:  #now we connect it to the rest of app, allowing it to get and "create" the tools needed
+
+        @tool
+        def document_searcher(query:str)-> str:
+             """
+            Search through the user's uploaded documents for relevant information.
+            Use this for questions about financial reports, company documents, or any uploaded files.
+            Args:
+                query: The search query to find relevant document content  
+            Returns:
+                str: Relevant content from the user's documents
+            """  #more code of conduct SHOULD ASK QUESTIONS ABOUT THIS
+             
+             try:
+                 user_id=getattr(self, 'current_id','user1') #we need the id to call the retriever functions BUT WHY WE SENDING USER1????
+                 rag_context, raw_docs = self.multiuser_retriever.query_user_documents(user_id, query, 4) #function gives us the context and docs which we will use next
+
+                 if rag_context and rag_context.strip():
+                     sources=[]
+                     if raw_docs:
+                         for doc in raw_docs[:4]:          #we no go through all, just first 4 docs
+                                source = doc.metadata.get("source", "unknown")  
+                                page = doc.metadata.get("page","N/A")
+                                sources.append(f"{source} (Page {page})")  #we got the source and page of the doc (if available) BUT GOTTA ASK MORE ABOUT THIS
+
+                     result=rag_context
+                     if sources:
+                         result += "\n\nSources:\n" + "\n".join(sources)  #concatination time! but only if we have sources hence the if
+                     return result
+                 else:
+                     return "No relevant information found in your documents."
+             except Exception as e:
+                 return f"Error retrieving documents: {str(e)}"    
+             
+
+        @tool
+        def live_searcher(query: str) -> str:
+            """
+            Search the internet for current information, news, stock prices, market data, etc.
+            Use this for questions about current events, latest news, real-time information, or general knowledge.
+            Args:
+                query: The search query for web search 
+            Returns:
+                str: Relevant information from web search results
+            """ #again more code of conduct NEED TO KNOW about this
+
+            try:
+                search_results = TavilySearcher().search(query,max_results=4)  #using the existing TavilySearcher class to search and get the top 4 results
+                if not search_results:
+                    return "lets test this."
+                else:
+                    s_result= []
+                    for i,result in enumerate(search_results[:3],1):   #iterate through the search results, get their info and throw em in the s_results
+                        title=result.get("title", "No title")
+                        content=result.get("content", "No available content")
+                        url=result.get("url", "No URL")
+                        s_result.append(f"Result {i}: {title}Content: {content}...Source: {url}")
             
-            # Get RAG context using the retriever function
-            rag_context, _ = self.rag_retriever_func(user_id, query)
-            state["rag_context"] = rag_context
-        except Exception as e:
-            print(f"RAG error: {e}")
-            state["rag_context"] = "No relevant documents found."
-        
-        return state
+            
+            except Exception as e:
+                return f"Error searching web: {str(e)}"
+            
+        return [live_searcher, document_searcher]  #we create new tools using existing tools (MINECRAFT STYLE) and then return them as a list
+        #also dont need to manually bind them to the agent as im using the create_react_agent function which does it automatically
     
-    def use_search(self, state: AgentState) -> AgentState:
-        """Use Tavily to search the web"""
+    def run(self, uquery: str, user_id: str) -> str:
+
         try:
-            query = state["user_query"]
-            search_results = tavily_searcher.search(query, max_results=3)
-            state["search_results"] = search_results
+            self._current_id_ = user_id  #get from arg and put it here so we can use in tool, specifically in the doc search
+            messages=[HumanMessage(content=uquery)]  #create a message with uquery as its contents
+            result = self.agent.invoke({
+                "messages": messages})  #WAKE MY HOMEBOY UP and give him the messages
+
+            if result and "messages" in result:
+                for message in reversed (result["messages"]):  #reverse the messages cuz what we want is in the last one
+                    if hasattr(message, 'content') and message.content:  #Grand Operation: check if the message has content     
+                        if not any (x in message.content.lower()
+                                    for x in ["action:", "observation:", "thought:"]):
+                            return message.content  #if the content is not empty and does not contain any of the processing stuff, LADIES AND GENTLEMEN, WE GOT EM
+                        
+        
+            else:
+                return "No valid response from agent." #else we wrong
+        
         except Exception as e:
-            print(f"Search error: {e}")
-            state["search_results"] = []
-        
-        return state
-    
-    def use_both(self, state: AgentState) -> AgentState:
-        """Use both RAG and search"""
-        state = self.use_rag(state)
-        state = self.use_search(state)
-        return state
-    
-    def generate_answer(self, state: AgentState) -> AgentState:
-        """Generate final answer based on available context"""
-        user_query = state["user_query"]
-        decision = state["decision"]
-        
-        # Build context based on what tools were used
-        context_parts = []
-        
-        if decision in ["rag", "both"] and state.get("rag_context"):
-            context_parts.append(f"DOCUMENT CONTEXT:\n{state['rag_context']}")
-        
-        if decision in ["search", "both"] and state.get("search_results"):
-            search_context = "\n\n".join([
-                f"SOURCE: {r['title']} ({r['url']})\n{r['content']}"
-                for r in state["search_results"][:3]
-            ])
-            context_parts.append(f"WEB SEARCH RESULTS:\n{search_context}")
-        
-        if not context_parts:
-            context_parts.append("No additional context available.")
-        
-        full_context = "\n\n" + "="*50 + "\n\n".join(context_parts)
-        
-        final_prompt = f"""
-        You are a helpful financial analyst assistant. Answer the user's question using the provided context.
-        
-        User Question: {user_query}
-        
-        Context: {full_context}
-        
-        Instructions:
-        - Provide a clear, concise answer (2-4 sentences)
-        - If using document context, focus on that information
-        - If using web search, include relevant current information
-        - If no relevant context is available, say so clearly
-        - Be honest about limitations
-        
-        Answer:
-        """
-        
-        try:
-            answer = ask_gemini(final_prompt).strip()
-            state["final_answer"] = answer
-        except Exception as e:
-            print(f"Answer generation error: {e}")
-            state["final_answer"] = "I apologize, but I encountered an error while generating the response."
-        
-        return state
-    
-    def run(self, user_query: str, user_id: str) -> str:
-        """Run the complete agent workflow"""
-        initial_state = {
-            "messages": [],
-            "user_query": user_query,
-            "decision": "rag",
-            "rag_context": "",
-            "search_results": [],
-            "final_answer": "",
-            "user_id": user_id
-        }
-        
-        try:
-            result = self.graph.invoke(initial_state)
-            return result["final_answer"]
-        except Exception as e:
-            print(f"Agent workflow error: {e}")
-            return "I apologize, but I encountered an error while processing your request."
+            print(f"Agent error: {e}")
+            return f"I encountered an error while processing your request: {str(e)}"
